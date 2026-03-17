@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Generator, Optional
+from pathlib import Path
+from typing import Generator
 
 from sqlalchemy import DateTime, Float, Integer, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -23,13 +24,17 @@ class CostRequest(Base):
     equipment_cost: Mapped[float] = mapped_column(Float, nullable=False)
     labour_cost: Mapped[float] = mapped_column(Float, nullable=False)
     civil_cost: Mapped[float] = mapped_column(Float, nullable=False)
+    total_cost: Mapped[float] = mapped_column(Float, nullable=False)
 
-    predicted_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 def _create_engine():
     settings = get_settings()
+    # Ensure the folder for sqlite file exists (e.g. ./data/fttp_cost.db)
+    if settings.database_url.startswith("sqlite"):
+        Path("data").mkdir(parents=True, exist_ok=True)
+
     connect_args = {}
     if settings.database_url.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
@@ -50,4 +55,28 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def save_request(
+    db: Session,
+    *,
+    fiber_length: float,
+    premises_count: int,
+    equipment_cost: float,
+    labour_cost: float,
+    civil_cost: float,
+    total_cost: float,
+) -> CostRequest:
+    obj = CostRequest(
+        fiber_length=float(fiber_length),
+        premises_count=int(premises_count),
+        equipment_cost=float(equipment_cost),
+        labour_cost=float(labour_cost),
+        civil_cost=float(civil_cost),
+        total_cost=float(total_cost),
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
 

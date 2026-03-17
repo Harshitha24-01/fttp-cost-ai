@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Literal
 
 import joblib
 import numpy as np
@@ -30,7 +30,70 @@ def _ensure_dirs() -> None:
 
 
 def _default_dataset_path() -> Path:
-    return Path("data") / "dataset.csv"
+    return Path("data") / "cost_dataset.csv"
+
+
+def generate_synthetic_cost_dataset(
+    n: int = 1000,
+    seed: int = 42,
+    output_path: str | os.PathLike | None = None,
+    noise: Literal["none", "low", "medium"] = "low",
+) -> Path:
+    """
+    Generate a synthetic FTTP cost dataset with columns:
+    fiber_length, premises_count, equipment_cost, labour_cost, civil_cost, total_cost
+    and write it to `data/cost_dataset.csv` by default.
+    """
+    _ensure_dirs()
+    path = Path(output_path) if output_path else _default_dataset_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.default_rng(seed)
+
+    # Reasonable-ish ranges for synthetic data; tune freely.
+    fiber_length = rng.uniform(0.1, 30.0, size=n)  # km
+    premises_count = rng.integers(1, 1500, size=n)
+
+    # Costs are correlated with size, but retain variance.
+    labour_cost = (premises_count * rng.uniform(60.0, 180.0, size=n)) + rng.uniform(2_000, 80_000, size=n)
+    civil_cost = (fiber_length * rng.uniform(2_000.0, 9_000.0, size=n)) + rng.uniform(2_000, 120_000, size=n)
+
+    # Equipment: baseline per premises plus some project variability.
+    equipment_cost = (premises_count * rng.uniform(900.0, 2200.0, size=n)) + rng.uniform(0, 50_000, size=n)
+
+    if noise == "none":
+        noise_scale = 0.0
+    elif noise == "low":
+        noise_scale = 0.03
+    else:
+        noise_scale = 0.08
+
+    rows: list[dict[str, float | int]] = []
+    for i in range(n):
+        res = calculate_cost(
+            fiber_length=float(fiber_length[i]),
+            premises_count=int(premises_count[i]),
+            equipment_cost=float(equipment_cost[i]),
+            labour_cost=float(labour_cost[i]),
+            civil_cost=float(civil_cost[i]),
+        )
+        total = float(res["total_cost"])
+        if noise_scale:
+            total = float(total * (1.0 + rng.normal(0.0, noise_scale)))
+        rows.append(
+            {
+                "fiber_length": float(fiber_length[i]),
+                "premises_count": int(premises_count[i]),
+                "equipment_cost": float(equipment_cost[i]),
+                "labour_cost": float(labour_cost[i]),
+                "civil_cost": float(civil_cost[i]),
+                "total_cost": total,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    df.to_csv(path, index=False)
+    return path
 
 
 def _load_dataset(dataset_path: Path | None = None) -> pd.DataFrame:
@@ -41,41 +104,8 @@ def _load_dataset(dataset_path: Path | None = None) -> pd.DataFrame:
         df = pd.read_csv(path)
         return df
 
-    # Create a small synthetic dataset so the project is runnable out-of-the-box.
-    rng = np.random.default_rng(42)
-    n = 300
-
-    fiber_length = rng.uniform(0.5, 20.0, size=n)  # km (example scale)
-    premises_count = rng.integers(1, 500, size=n)
-    labour_cost = rng.uniform(5_000, 150_000, size=n)
-    civil_cost = rng.uniform(5_000, 250_000, size=n)
-
-    # Spec says equipment_cost input is overridden; keep a column anyway.
-    equipment_cost = premises_count * 1500.0
-
-    rows = []
-    for i in range(n):
-        res = calculate_cost(
-            fiber_length=float(fiber_length[i]),
-            premises_count=int(premises_count[i]),
-            equipment_cost=float(equipment_cost[i]),
-            labour_cost=float(labour_cost[i]),
-            civil_cost=float(civil_cost[i]),
-        )
-        rows.append(
-            {
-                "fiber_length": float(fiber_length[i]),
-                "premises_count": int(premises_count[i]),
-                "equipment_cost": float(equipment_cost[i]),
-                "labour_cost": float(labour_cost[i]),
-                "civil_cost": float(civil_cost[i]),
-                "total_cost": float(res.total_cost),
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    df.to_csv(path, index=False)
-    return df
+    generate_synthetic_cost_dataset(n=1000, seed=42, output_path=path)
+    return pd.read_csv(path)
 
 
 def train_and_save_model(
@@ -136,4 +166,10 @@ def predict_cost(
     )
     y_pred = model.predict(x)[0]
     return float(y_pred)
+
+
+if __name__ == "__main__":
+    # One-command training: writes `data/cost_dataset.csv` and `models/cost_model.pkl` by default.
+    info = train_and_save_model()
+    print(f"Trained cost model. r2={info['r2']:.4f} saved={info['model_path']}")
 

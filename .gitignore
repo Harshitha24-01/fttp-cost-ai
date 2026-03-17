@@ -39,3 +39,8 @@ htmlcov/
 *.log
 
 backend.db
+
+# Generated local artifacts
+data/*.db
+models/*.pkl
+data/cost_dataset.csv

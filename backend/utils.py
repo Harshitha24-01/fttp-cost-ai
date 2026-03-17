@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    database_url: str = "sqlite:///./backend.db"
+    database_url: str = "sqlite:///./data/fttp_cost.db"
     model_path: str = "models/cost_model.pkl"
     anomaly_model_path: str = "models/anomaly_model.pkl"
     log_level: str = "INFO"

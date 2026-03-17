@@ -1,23 +1,22 @@
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .anomaly_detection import detect_anomaly
 from .cost_engine import calculate_cost
-from .database import CostRequest, get_db, init_db
+from .database import get_db, init_db, save_request
 from .map_service import LocationNotFoundError, calculate_distance
 from .ml_model import predict_cost
-from .llm_agent import LLMConfigurationError, generate_ai_suggestions
-from .optimization_agent import optimize_cost
+from .llm_agent import (
+    LLMConfigurationError,
+    explain_cost,
+    optimize_cost as optimize_cost_ai,
+)
 from .schemas import (
     CostInputs,
-    DetectAnomalyResponse,
     EstimateCostRequest,
-    PredictCostResponse,
-    SimulateNetworkRequest,
 )
-from .simulation import simulate_network_build
 from .utils import configure_logging, get_settings
 
 
@@ -38,6 +37,12 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    # Avoid noisy 404s from browsers requesting a favicon.
+    return Response(status_code=204)
+
+
 @app.post("/estimate-cost")
 def estimate_cost(payload: EstimateCostRequest, db: Session = Depends(get_db)):
     try:
@@ -53,65 +58,58 @@ def estimate_cost(payload: EstimateCostRequest, db: Session = Depends(get_db)):
         civil_cost=payload.civil_cost,
     )
 
-    anomaly_status = detect_anomaly(
+    save_request(
+        db,
         fiber_length=distance_km,
         premises_count=payload.premises_count,
         equipment_cost=payload.equipment_cost,
         labour_cost=payload.labour_cost,
         civil_cost=payload.civil_cost,
+        total_cost=float(res["total_cost"]),
     )
-    is_anomaly = anomaly_status != "Normal"
 
-    db_obj = CostRequest(
-        fiber_length=distance_km,
-        premises_count=payload.premises_count,
-        equipment_cost=payload.equipment_cost,
-        labour_cost=payload.labour_cost,
-        civil_cost=payload.civil_cost,
-        predicted_cost=None,
-    )
-    db.add(db_obj)
-    db.commit()
-
-    logger.info("estimate-cost saved request_id=%s anomaly=%s distance_km=%.3f", db_obj.id, is_anomaly, distance_km)
-    return {"distance_km": round(distance_km), **res, "anomaly": is_anomaly}
+    logger.info("estimate-cost saved distance_km=%.3f", distance_km)
+    return {"distance_km": float(round(distance_km, 3)), **res}
 
 
-@app.post("/simulate-network")
-def simulate_network(payload: SimulateNetworkRequest):
-    result = simulate_network_build(
-        houses=payload.houses,
-        avg_fiber_length_per_house=payload.avg_fiber_length_per_house,
-        equipment_cost_per_house=payload.equipment_cost_per_house,
-        labour_cost_per_house=payload.labour_cost_per_house,
-        civil_cost_per_house=payload.civil_cost_per_house,
-    )
-    return result
+class ExplainCostRequest(BaseModel):
+    data: CostInputs
+    total_cost: float = Field(..., ge=0)
 
 
-@app.post("/optimize-cost")
-def optimize_cost_endpoint(payload: CostInputs):
-    suggestions = optimize_cost(
-        fiber_length=payload.fiber_length,
-        premises_count=payload.premises_count,
-        equipment_cost=payload.equipment_cost,
-        labour_cost=payload.labour_cost,
-        civil_cost=payload.civil_cost,
-    )
-    return {"optimization_suggestions": suggestions}
+class GenerateReportRequest(BaseModel):
+    data: CostInputs
+    total_cost: float = Field(..., ge=0)
 
 
-@app.post("/ai-optimize")
-async def ai_optimize(payload: CostInputs):
+class ChatInputRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+@app.post("/explain-cost")
+def explain_cost_endpoint(payload: ExplainCostRequest):
     try:
-        return await generate_ai_suggestions(payload.model_dump())
+        explanation = explain_cost(payload.data.model_dump(), payload.total_cost)
+        return {"explanation": explanation}
     except LLMConfigurationError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@app.post("/predict-cost", response_model=PredictCostResponse)
-def predict_cost_endpoint(payload: CostInputs, db: Session = Depends(get_db)) -> PredictCostResponse:
-    y_pred = predict_cost(
+@app.post("/optimize-cost-ai")
+def optimize_cost_ai_endpoint(payload: CostInputs):
+    try:
+        suggestions = optimize_cost_ai(payload.model_dump())
+        return {"suggestions": suggestions}
+    except LLMConfigurationError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        # Avoid opaque "Internal Server Error" for LLM-related failures
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/predict-cost")
+def predict_cost_endpoint(payload: CostInputs) -> dict:
+    predicted = predict_cost(
         fiber_length=payload.fiber_length,
         premises_count=payload.premises_count,
         equipment_cost=payload.equipment_cost,
@@ -119,50 +117,11 @@ def predict_cost_endpoint(payload: CostInputs, db: Session = Depends(get_db)) ->
         civil_cost=payload.civil_cost,
     )
 
-    anomaly_status = detect_anomaly(
+    rule = calculate_cost(
         fiber_length=payload.fiber_length,
         premises_count=payload.premises_count,
         equipment_cost=payload.equipment_cost,
         labour_cost=payload.labour_cost,
         civil_cost=payload.civil_cost,
     )
-    is_anomaly = anomaly_status != "Normal"
-
-    db_obj = CostRequest(
-        fiber_length=payload.fiber_length,
-        premises_count=payload.premises_count,
-        equipment_cost=payload.equipment_cost,
-        labour_cost=payload.labour_cost,
-        civil_cost=payload.civil_cost,
-        predicted_cost=y_pred,
-    )
-    db.add(db_obj)
-    db.commit()
-
-    logger.info("predict-cost saved request_id=%s anomaly=%s", db_obj.id, is_anomaly)
-    return PredictCostResponse(predicted_cost=y_pred, anomaly=is_anomaly)
-
-
-@app.post("/detect-anomaly", response_model=DetectAnomalyResponse)
-def detect_anomaly_endpoint(payload: CostInputs, db: Session = Depends(get_db)) -> DetectAnomalyResponse:
-    status = detect_anomaly(
-        fiber_length=payload.fiber_length,
-        premises_count=payload.premises_count,
-        equipment_cost=payload.equipment_cost,
-        labour_cost=payload.labour_cost,
-        civil_cost=payload.civil_cost,
-    )
-
-    db_obj = CostRequest(
-        fiber_length=payload.fiber_length,
-        premises_count=payload.premises_count,
-        equipment_cost=payload.equipment_cost,
-        labour_cost=payload.labour_cost,
-        civil_cost=payload.civil_cost,
-        predicted_cost=None,
-    )
-    db.add(db_obj)
-    db.commit()
-
-    logger.info("detect-anomaly saved request_id=%s status=%s", db_obj.id, status)
-    return DetectAnomalyResponse(status=status)
+    return {"predicted_cost": float(predicted), "rule_based_total_cost": float(rule["total_cost"])}
