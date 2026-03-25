@@ -15,12 +15,13 @@ class CostInputs(BaseModel):
 
 
 class EstimateCostRequest(BaseModel):
-    start_location: str = Field(..., min_length=1)
-    end_location: str = Field(..., min_length=1)
+    source: str = Field(..., min_length=1)
+    destination: str = Field(..., min_length=1)
     premises_count: int = Field(..., ge=1)
     equipment_cost: float = Field(..., ge=0)
     labour_cost: float = Field(..., ge=0)
     civil_cost: float = Field(..., ge=0)
+    revenue_per_user: float = Field(..., ge=0)
 
 
 class SimulateNetworkRequest(BaseModel):

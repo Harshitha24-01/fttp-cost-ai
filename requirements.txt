@@ -9,3 +9,7 @@ pydantic-settings
 geopy
 httpx
 groq
+requests
+passlib
+python-jose
+bcrypt

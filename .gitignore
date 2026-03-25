@@ -44,3 +44,6 @@ backend.db
 data/*.db
 models/*.pkl
 data/cost_dataset.csv
+
+frontend/node_modules/
+frontend/dist/
